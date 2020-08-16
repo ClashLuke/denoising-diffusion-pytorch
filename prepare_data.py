@@ -1,13 +1,13 @@
 import argparse
-from io import BytesIO
 import multiprocessing
 from functools import partial
+from io import BytesIO
 
-from PIL import Image
 import lmdb
-from tqdm import tqdm
+from PIL import Image
 from torchvision import datasets
 from torchvision.transforms import functional as trans_fn
+from tqdm import tqdm
 
 
 def resize_and_convert(img, size, resample, quality=100):
@@ -68,10 +68,10 @@ if __name__ == '__main__':
     parser.add_argument('path', type=str)
 
     args = parser.parse_args()
-    
+
     resample_map = {'lanczos': Image.LANCZOS, 'bilinear': Image.BILINEAR}
     resample = resample_map[args.resample]
-    
+
     sizes = [int(s.strip()) for s in args.size.split(',')]
 
     print(f'Make dataset of image sizes:', ', '.join(str(s) for s in sizes))

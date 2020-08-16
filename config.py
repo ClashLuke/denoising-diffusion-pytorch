@@ -1,6 +1,6 @@
 from typing import Optional, List
-from pydantic import StrictStr, StrictInt, StrictFloat, StrictBool
 
+from pydantic import StrictStr, StrictInt, StrictFloat, StrictBool
 from tensorfn.config import Config, Optimizer, Scheduler, DataLoader
 
 

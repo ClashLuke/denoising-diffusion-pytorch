@@ -1,18 +1,13 @@
-import os
-
 import torch
-from torch import nn, optim
-from torch.utils import data
-from torchvision import transforms
-from tensorfn import load_arg_config
 from tensorfn import distributed as dist
-from tensorfn.optim import lr_scheduler
-from tqdm import tqdm
+from tensorfn import load_arg_config
+from torch import nn
+from torchvision import transforms
 
-from model import UNet
-from diffusion import GaussianDiffusion, make_beta_schedule
-from dataset import MultiResolutionDataset
 from config import DiffusionConfig
+from dataset import MultiResolutionDataset
+from diffusion import GaussianDiffusion, make_beta_schedule
+from model import UNet
 
 
 def sample_data(loader):

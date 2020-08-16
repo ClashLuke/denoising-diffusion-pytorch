@@ -6,8 +6,8 @@ from torch.nn import functional as F
 def make_beta_schedule(schedule, start, end, n_timestep):
     if schedule == "linear":
         betas = (
-            torch.linspace(start ** 0.5, end ** 0.5, n_timestep, dtype=torch.float64)
-            ** 2
+                torch.linspace(start ** 0.5, end ** 0.5, n_timestep, dtype=torch.float64)
+                ** 2
         )
 
     return betas
@@ -78,8 +78,8 @@ class GaussianDiffusion(nn.Module):
             noise = torch.randn_like(x_0)
 
         return (
-            extract(self.sqrt_alphas_cumprod, t, x_0.shape) * x_0
-            + extract(self.sqrt_one_minus_alphas_cumprod, t, x_0.shape) * noise
+                extract(self.sqrt_alphas_cumprod, t, x_0.shape) * x_0
+                + extract(self.sqrt_one_minus_alphas_cumprod, t, x_0.shape) * noise
         )
 
     def p_loss(self, model, x_0, t, noise=None):
@@ -93,14 +93,14 @@ class GaussianDiffusion(nn.Module):
 
     def predict_start_from_noise(self, x_t, t, noise):
         return (
-            extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t
-            - extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
+                extract(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t
+                - extract(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * noise
         )
 
     def q_posterior(self, x_0, x_t, t):
         mean = (
-            extract(self.posterior_mean_coef1, t, x_t.shape) * x_0
-            + extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
+                extract(self.posterior_mean_coef1, t, x_t.shape) * x_0
+                + extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
         )
         var = extract(self.posterior_variance, t, x_t.shape)
         log_var_clipped = extract(self.posterior_log_variance_clipped, t, x_t.shape)

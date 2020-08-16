@@ -1,9 +1,8 @@
 from io import BytesIO
 
-import lmdb
 from PIL import Image
-from torch.utils.data import Dataset
 from tensorfn.data import LMDBReader
+from torch.utils.data import Dataset
 
 
 class MultiResolutionDataset(Dataset):
