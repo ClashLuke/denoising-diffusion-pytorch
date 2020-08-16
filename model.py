@@ -4,8 +4,9 @@ import torch
 from torch import nn
 
 
-def swish(input):
-    return input * torch.sigmoid(input)
+@torch.jit.script
+def mish(inp):
+    return inp.mul(torch.nn.functional.softplus(inp).tanh())
 
 
 @torch.no_grad()
@@ -32,19 +33,10 @@ def variance_scaling_init_(tensor, scale=1, mode="fan_avg", distribution="unifor
         return tensor.uniform_(-bound, bound)
 
 
-def conv2d(
-    in_channel,
-    out_channel,
-    kernel_size,
-    stride=1,
-    padding=0,
-    bias=True,
-    scale=1,
-    mode="fan_avg",
-):
-    conv = nn.Conv2d(
-        in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias
-    )
+def conv2d(in_channel, out_channel, kernel_size, stride=1, padding=0, bias=True, scale=1., mode="fan_avg",
+           transpose=False):
+    conv_class = getattr(nn, f'Conv{"Transpose" if transpose else ""}2d')
+    conv = conv_class(in_channel, out_channel, kernel_size, stride=stride, padding=padding, bias=bias)
 
     variance_scaling_init_(conv.weight, scale, mode=mode)
 
@@ -63,104 +55,93 @@ def linear(in_channel, out_channel, scale=1, mode="fan_avg"):
     return lin
 
 
-class Swish(nn.Module):
+class Mish(torch.jit.ScriptModule):
     def __init__(self):
         super().__init__()
 
     def forward(self, input):
-        return swish(input)
+        return mish(input)
 
 
-class Upsample(nn.Sequential):
-    def __init__(self, channel):
-        layers = [
-            nn.Upsample(scale_factor=2, mode="nearest"),
-            conv2d(channel, channel, 3, padding=1),
-        ]
-
-        super().__init__(*layers)
+def upsample(channel):
+    return conv2d(channel, channel, 4, stride=2, padding=1, transpose=True)
 
 
-class Downsample(nn.Sequential):
-    def __init__(self, channel):
-        layers = [conv2d(channel, channel, 3, stride=2, padding=1)]
-
-        super().__init__(*layers)
+def downsample(channel):
+    return conv2d(channel, channel, 3, stride=2, padding=1)
 
 
-class ResBlock(nn.Module):
+@torch.jit.script
+def nothing(inp):
+    return inp
+
+
+class ResBlock(torch.jit.ScriptModule):
     def __init__(self, in_channel, out_channel, time_dim, dropout):
         super().__init__()
 
         self.norm1 = nn.GroupNorm(32, in_channel)
-        self.activation1 = Swish()
         self.conv1 = conv2d(in_channel, out_channel, 3, padding=1)
 
-        self.time = nn.Sequential(Swish(), linear(time_dim, out_channel))
+        self.time = linear(time_dim, out_channel)
 
         self.norm2 = nn.GroupNorm(32, out_channel)
-        self.activation2 = Swish()
         self.dropout = nn.Dropout(dropout)
         self.conv2 = conv2d(out_channel, out_channel, 3, padding=1, scale=1e-10)
-
-        if in_channel != out_channel:
-            self.skip = conv2d(in_channel, out_channel, 1)
-
-        else:
-            self.skip = None
+        self.skip = conv2d(in_channel, out_channel, 1) if in_channel != out_channel else nothing
 
     def forward(self, input, time):
         batch = input.shape[0]
 
-        out = self.conv1(self.activation1(self.norm1(input)))
+        out = self.conv1(mish(self.norm1(input)))
 
-        out = out + self.time(time).view(batch, -1, 1, 1)
+        out = out + self.time(mish(time)).view(batch, -1, 1, 1)
 
-        out = self.conv2(self.dropout(self.activation2(self.norm2(out))))
+        out = self.conv2(self.dropout(mish(self.norm2(out))))
 
-        if self.skip is not None:
-            input = self.skip(input)
-
-        return out + input
+        return out + self.skip(input)
 
 
-class SelfAttention(nn.Module):
-    def __init__(self, in_channel):
+class SelfAttention(torch.jit.ScriptModule):
+    def __init__(self, in_channel, heads=16):
         super().__init__()
 
         self.norm = nn.GroupNorm(32, in_channel)
-        self.qkv = conv2d(in_channel, in_channel * 4, 1)
-        self.out = conv2d(in_channel, in_channel, 1, scale=1e-10)
+        self.weight = torch.nn.Parameter(torch.randn(2 * (in_channel * heads + heads) + in_channel, in_channel))
+        self.gate = torch.nn.Parameter(torch.zeros(1))
+        self.heads = heads
+        self.in_channel = in_channel
 
-    def forward(self, input):
-        batch, channel, height, width = input.shape
+    def forward(self, inp):
+        batch, channel, height, width = inp.shape
 
-        norm = self.norm(input)
-        qkv = self.qkv(norm)
-        query, key, value = qkv.chunk(3, dim=1)
+        out = self.weight.unsqueeze(0).expand(batch, -1, -1).bmm(self.norm(inp).view(batch, channel, -1))
+        lin = out[:, :self.in_channel]
+        key = out[:, self.in_channel:self.in_channel * (1 + self.heads)].view(batch, channel, self.heads,
+                                                                              height * width)
+        query = out[:, self.in_channel * (1 + self.heads):
+                       self.in_channel + 2 * self.in_channel * self.heads].view(batch, channel, self.heads,
+                                                                                height * width)
+        key_choice = out[:, self.in_channel + 2 * self.in_channel * self.heads:
+                            self.in_channel + 2 * self.in_channel * self.heads + self.heads].softmax(1)
+        query_choice = out[:, self.in_channel + 2 * self.in_channel * self.heads + self.heads:].softmax(1)
 
-        attn = torch.einsum("nchw, ncyx -> nhwyx", query, key).contiguous() / math.sqrt(
-            channel
-        )
-        attn = attn.view(batch, height, width, -1)
-        attn = torch.softmax(attn, -1)
-        attn = attn.view(batch, height, width, height, width)
+        key = key.mul(key_choice.unsqueeze(1)).sum(1)
+        query = query.mul(query_choice.unsqueeze(1)).sum(1)
 
-        out = torch.einsum("nhwyx, ncyx -> nchw", attn, input).contiguous()
-        out = self.out(out)
-
-        return out + input
+        key = key.softmax(2).bmm(query.transpose(1, 2))
+        lin = lin.bmm(key)
+        out = lin * self.gate + inp
+        return out
 
 
-class TimeEmbedding(nn.Module):
+class TimeEmbedding(torch.jit.ScriptModule):
     def __init__(self, dim):
         super().__init__()
 
         self.dim = dim
 
-        inv_freq = torch.exp(
-            torch.arange(0, dim, 2, dtype=torch.float32) * (-math.log(10000) / dim)
-        )
+        inv_freq = torch.exp(torch.arange(0, dim, 2, dtype=torch.float32) * (-math.log(10000) / dim))
 
         self.register_buffer("inv_freq", inv_freq)
 
@@ -173,24 +154,17 @@ class TimeEmbedding(nn.Module):
         return pos_emb
 
 
-class ResBlockWithAttention(nn.Module):
+class ResBlockWithAttention(torch.jit.ScriptModule):
     def __init__(self, in_channel, out_channel, time_dim, dropout, use_attention=False):
         super().__init__()
 
         self.resblocks = ResBlock(in_channel, out_channel, time_dim, dropout)
 
-        if use_attention:
-            self.attention = SelfAttention(out_channel)
-
-        else:
-            self.attention = None
+        self.attention = SelfAttention(out_channel) if use_attention else nothing
 
     def forward(self, input, time):
         out = self.resblocks(input, time)
-
-        if self.attention is not None:
-            out = self.attention(out)
-
+        out = self.attention(out)
         return out
 
 
@@ -202,11 +176,8 @@ def spatial_fold(input, fold):
     h_fold = height // fold
     w_fold = width // fold
 
-    return (
-        input.view(batch, channel, h_fold, fold, w_fold, fold)
-        .permute(0, 1, 3, 5, 2, 4)
-        .reshape(batch, -1, h_fold, w_fold)
-    )
+    return input.view(batch, channel, h_fold, fold, w_fold,
+                      fold).permute(0, 1, 3, 5, 2, 4).reshape(batch, -1, h_fold, w_fold)
 
 
 def spatial_unfold(input, unfold):
@@ -217,23 +188,20 @@ def spatial_unfold(input, unfold):
     h_unfold = height * unfold
     w_unfold = width * unfold
 
-    return (
-        input.view(batch, -1, unfold, unfold, height, width)
-        .permute(0, 1, 4, 2, 5, 3)
-        .reshape(batch, -1, h_unfold, w_unfold)
-    )
+    return input.view(batch, -1, unfold, unfold, height,
+                      width).permute(0, 1, 4, 2, 5, 3).reshape(batch, -1, h_unfold, w_unfold)
 
 
-class UNet(nn.Module):
+class UNet(torch.jit.ScriptModule):
     def __init__(
-        self,
-        in_channel,
-        channel,
-        channel_multiplier,
-        n_res_blocks,
-        attn_strides,
-        dropout=0,
-        fold=1,
+            self,
+            in_channel,
+            channel,
+            channel_multiplier,
+            n_res_blocks,
+            attn_strides,
+            dropout=0,
+            fold=1,
     ):
         super().__init__()
 
@@ -246,7 +214,7 @@ class UNet(nn.Module):
         self.time = nn.Sequential(
             TimeEmbedding(channel),
             linear(channel, time_dim),
-            Swish(),
+            Mish(),
             linear(time_dim, time_dim),
         )
 
@@ -271,7 +239,7 @@ class UNet(nn.Module):
                 in_channel = channel_mult
 
             if i != n_block - 1:
-                down_layers.append(Downsample(in_channel))
+                down_layers.append(downsample(in_channel))
                 feat_channels.append(in_channel)
 
         self.down = nn.ModuleList(down_layers)
@@ -309,15 +277,12 @@ class UNet(nn.Module):
                 in_channel = channel_mult
 
             if i != 0:
-                up_layers.append(Upsample(in_channel))
+                up_layers.append(upsample(in_channel))
 
         self.up = nn.ModuleList(up_layers)
 
-        self.out = nn.Sequential(
-            nn.GroupNorm(32, in_channel),
-            Swish(),
-            conv2d(in_channel, 3 * (fold ** 2), 3, padding=1, scale=1e-10),
-        )
+        self.out_norm = nn.GroupNorm(32, in_channel)
+        self.out_conv = conv2d(in_channel, 3 * (fold ** 2), 3, padding=1, scale=1e-10)
 
     def forward(self, input, time):
         time_embed = self.time(time)
@@ -344,7 +309,7 @@ class UNet(nn.Module):
             else:
                 out = layer(out)
 
-        out = self.out(out)
+        out = self.out_conv(mish(self.out_norm(out)))
         out = spatial_unfold(out, self.fold)
 
         return out
