@@ -130,7 +130,8 @@ class SelfAttention(torch.jit.ScriptModule):
         query = query.mul(query_choice.unsqueeze(1)).sum(2)
 
         key = key.softmax(2).bmm(query.transpose(1, 2))
-        lin = lin.bmm(key)
+        lin = key.bmm(lin)
+        lin = lin.view(batch, channel, height, width)
         out = lin * self.gate + inp
         return out
 
