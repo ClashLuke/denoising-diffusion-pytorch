@@ -77,7 +77,7 @@ def train(conf, loader, model, ema, diffusion, optimizer, scheduler, device):
 
 
 def main(conf):
-    device = "cuda"
+    device = "cuda:0" if torch.cuda.is_available() else 'cpu'
     beta_schedule = "linear"
     beta_start = 1e-4
     beta_end = 2e-2
