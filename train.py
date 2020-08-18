@@ -50,7 +50,7 @@ def train(conf, loader, model, ema, diffusion, optimizer, scheduler, device):
         optimizer.step()
 
         accumulate(
-            ema, model.module, 0 if i < conf.training.scheduler.warmup else 0.9999
+            ema, model, 0 if i < conf.training.scheduler.warmup else 0.9999
         )
 
         if dist.is_primary():
