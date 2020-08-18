@@ -80,12 +80,12 @@ class ResBlock(torch.jit.ScriptModule):
     def __init__(self, in_channel, out_channel, time_dim, dropout):
         super().__init__()
 
-        self.norm1 = nn.GroupNorm(32, in_channel)
+        self.norm1 = nn.InstanceNorm2d( in_channel)
         self.conv1 = conv2d(in_channel, out_channel, 3, padding=1)
 
         self.time = linear(time_dim, out_channel)
 
-        self.norm2 = nn.GroupNorm(32, out_channel)
+        self.norm2 = nn.InstanceNorm2d( out_channel)
         self.dropout = nn.Dropout(dropout)
         self.conv2 = conv2d(out_channel, out_channel, 3, padding=1, scale=1e-10)
         self.skip = conv2d(in_channel, out_channel, 1) if in_channel != out_channel else nothing
@@ -97,16 +97,16 @@ class ResBlock(torch.jit.ScriptModule):
 
         out = out + self.time(mish(time)).view(batch, -1, 1, 1)
 
-        out = self.conv2(self.dropout(mish(self.norm2(out))))
+        out = self.conv2(mish(self.norm2(out)))
 
         return out + self.skip(input)
 
 
 class SelfAttention(torch.jit.ScriptModule):
-    def __init__(self, in_channel, heads=16):
+    def __init__(self, in_channel, heads=1):
         super().__init__()
 
-        self.norm = nn.GroupNorm(32, in_channel)
+        self.norm = nn.InstanceNorm2d( in_channel)
         self.weight = torch.nn.Parameter(torch.randn(2 * (in_channel * heads + heads) + in_channel, in_channel))
         self.gate = torch.nn.Parameter(torch.zeros(1))
         self.heads = heads
