@@ -1,0 +1,6 @@
+tensorfn
+pydantic 
+torch
+torchvision
+lmdb
+tqdm
