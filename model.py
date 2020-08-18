@@ -126,8 +126,8 @@ class SelfAttention(torch.jit.ScriptModule):
                             self.in_channel + 2 * self.in_channel * self.heads + self.heads].softmax(1)
         query_choice = out[:, self.in_channel + 2 * self.in_channel * self.heads + self.heads:].softmax(1)
 
-        key = key.mul(key_choice.unsqueeze(1)).sum(1)
-        query = query.mul(query_choice.unsqueeze(1)).sum(1)
+        key = key.mul(key_choice.unsqueeze(1)).sum(2)
+        query = query.mul(query_choice.unsqueeze(1)).sum(2)
 
         key = key.softmax(2).bmm(query.transpose(1, 2))
         lin = lin.bmm(key)
