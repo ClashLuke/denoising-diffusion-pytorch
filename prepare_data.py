@@ -7,47 +7,55 @@ import lmdb
 from PIL import Image
 from torchvision import datasets
 from torchvision.transforms import functional as trans_fn
-from tqdm import tqdm
+import time
 
+PRINTERVALL = 1024
 
-def resize_and_convert(img, size, quality=100):
-    img = trans_fn.resize(img, size, Image.LANCZOS)
-    img = trans_fn.center_crop(img, size)
+def resize_and_convert(img, size):
     buffer = BytesIO()
-    img.save(buffer, format='jpeg', quality=quality)
-    val = buffer.getvalue()
-    return val
+    trans_fn.center_crop(trans_fn.resize(img, size, Image.LANCZOS), size).save(buffer, format='jpeg', quality=100)
+    return buffer.getvalue()
 
 
 def resize_worker(img_file, sizes):
-    i, file = img_file
-    img = Image.open(file)
-    img = img.convert('RGB')
-    out = [resize_and_convert(img, size, 100) for size in sizes]
-    return i, out
+    img = Image.open(img_file[1]).convert('RGB')
+    return img_file[0], [resize_and_convert(img, size) for size in sizes]
 
 
-def prepare(env, dataset, n_worker, sizes=(128, 256, 512, 1024)):
+def open_db(name):
+    def _make():
+        return lmdb.open(name, map_size=1e12, readahead=False, writemap=True)
+    return _make
+
+def prepare(out, dataset, n_worker, sizes=(128, 256, 512, 1024), buffer=64):
     resize_fn = partial(resize_worker, sizes=sizes)
-    files = [(i, file) for i, (file, label) in enumerate(sorted(dataset.imgs, key=lambda x: x[0]))]
+    image_count = str(len(dataset))
+    files = [(i, file) for i, (file, label) in enumerate(sorted(dataset.imgs, key=lambda x: x[0]), 1)]
+    start = time.time()
+    make_db = open_db(out)
+    db = make_db()
+    txn = db.begin(write=True)
 
     with multiprocessing.Pool(n_worker) as pool:
-        for i, imgs in tqdm(pool.imap_unordered(resize_fn, files)):
+        for i, imgs in pool.imap_unordered(resize_fn, files):
             for size, img in zip(sizes, imgs):
-                key = f'{size}-{str(i).zfill(5)}'.encode('utf-8')
+                txn.put(f'{size}-{i:05d}'.encode('utf-8'), img)
+            if i%PRINTERVALL == 0:
+                print(f"\r[{i:{len(image_count)}d}/{image_count}] Rate: {i/(time.time()-start):.2f} Img/s", end='')
+            if i%buffer == 0:
+                txn.commit()
+                db.close()
+                db = make_db()
+                txn = db.begin(write=True)
 
-                with env.begin(write=True) as txn:
-                    txn.put(key, img)
-
-        with env.begin(write=True) as txn:
-            txn.put('length'.encode('utf-8'), str(i + 1).encode('utf-8'))
+        txn.put('length'.encode('utf-8'), str(i + 1).encode('utf-8'))
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--out', type=str)
-    parser.add_argument('--size', type=str, default='128,256,512,1024')
-    parser.add_argument('--n_worker', type=int, default=8)
+    parser.add_argument('--out', type=str, default="out.lmdb")
+    parser.add_argument('--size', type=str, default=','.join(map(str, (64 * 2 ** i * (j + 2) for i in range(4) for j in range(2)))))
+    parser.add_argument('--n_worker', type=int, default=12)
     parser.add_argument('path', type=str)
 
     args = parser.parse_args()
@@ -58,5 +66,4 @@ if __name__ == '__main__':
 
     imgset = datasets.ImageFolder(args.path)
 
-    with lmdb.open(args.out, map_size=1024 ** 4, readahead=False) as env:
-        prepare(env, imgset, args.n_worker, sizes=sizes)
+    prepare(args.out, imgset, args.n_worker, sizes=sizes)
